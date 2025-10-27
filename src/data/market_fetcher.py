@@ -57,7 +57,6 @@ class MarketFetcher:
             return pd.DataFrame(columns=['t', 'o', 'h', 'l', 'c', 'v'])
 
         df = pd.DataFrame(data, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-        # df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume'] # Уже правильные имена
         df['t'] = pd.to_datetime(df['t'], unit='ms')
         df = df.sort_values('t').reset_index(drop=True)
         for col in ['o', 'h', 'l', 'c', 'v']:
@@ -77,53 +76,34 @@ class MarketFetcher:
         return df
 
     def _get_funding_and_oi(self, asset: str) -> Dict:
-        """Получает funding rate и open interest через Hyperliquid API"""
-        # Получим индекс актива
-        meta_resp = requests.post(self.info_url, json={"type": "meta"})
-        if meta_resp.status_code != 200:
-            raise Exception("Error fetching meta from Hyperliquid")
-        meta = meta_resp.json()
-
-        coin_idx = None
-        for i, coin in enumerate(meta['universe']):
-            if coin['name'] == asset:
-                coin_idx = i
-                break
-
-        if coin_idx is None:
-            raise ValueError(f"Asset {asset} not found in Hyperliquid universe")
-
-        # --- ИСПРАВЛЕНО: Open Interest ---
-        oi_resp = requests.post(self.info_url, json={"type": "metaAndAssetCtxs"})
-        if oi_resp.status_code != 200:
-            print(f"Error fetching metaAndAssetCtxs for {asset}: {oi_resp.text}")
+        """Получает funding rate и open interest через Hyperliquid API (исправлено)"""
+        # --- ИСПРАВЛЕНО: metaAndAssetCtxs возвращает [meta, [ctx0, ctx1, ...]] ---
+        resp = requests.post(self.info_url, json={"type": "metaAndAssetCtxs"})
+        if resp.status_code != 200:
+            print(f"Error fetching metaAndAssetCtxs for {asset}: {resp.text}")
             # Возвращаем заглушки, чтобы не ломать цикл
             return {
                 "open_interest": {"latest": 0.0, "average": 0.0},
                 "funding_rate": 0.0
             }
-        oi_data = oi_resp.json()
-        # Теперь структура: [{"assetCtx": {...}, "meta": {...}}, ...]
-        # Берём нужный индекс
-        asset_ctx = oi_data['assetCtxs'][coin_idx]
-        latest_oi = float(asset_ctx['openInterest'])
 
-        # --- ИСПРАВЛЕНО: Funding Rate ---
-        funding_resp = requests.post(self.info_url, json={"type": "metaAndAssetCtxs"})
-        if funding_resp.status_code != 200:
-            print(f"Error fetching funding (metaAndAssetCtxs) for {asset}: {funding_resp.text}")
-            # Возвращаем заглушки
-            return {
-                "open_interest": {"latest": latest_oi, "average": latest_oi * 0.99},
-                "funding_rate": 0.0
-            }
-        funding_data = funding_resp.json()
-        # fundingRate возвращается в формате строки, например "0.00001234"
-        funding_rate_str = funding_data['assetCtxs'][coin_idx]['funding']
-        funding_rate = float(funding_rate_str)
+        data = resp.json()
+        universe = data[0]["universe"]
+        asset_ctxs = data[1]
+
+        # Найдём индекс актива
+        coin_idx = next((i for i, x in enumerate(universe) if x["name"] == asset), None)
+        if coin_idx is None:
+            raise ValueError(f"Asset {asset} not found in Hyperliquid universe")
+
+        # Получим контекст нужного актива
+        ctx = asset_ctxs[coin_idx]
+
+        funding_rate = float(ctx["funding"])
+        open_interest = float(ctx["openInterest"])
 
         return {
-            "open_interest": {"latest": latest_oi, "average": latest_oi * 0.99},  # Заглушка для среднего
+            "open_interest": {"latest": open_interest, "average": open_interest * 0.99},  # Заглушка для среднего
             "funding_rate": funding_rate
         }
 
@@ -138,11 +118,55 @@ class MarketFetcher:
         df_3m = self._get_candles_hl(asset, "3m", 20)  # 20 для буфера
         if df_3m.empty:
             print(f"Warning: No 3m data for {asset}, returning empty dict")
-            return {}
+            # --- ИСПРАВЛЕНО: возвращаем заглушку с ключами ---
+            return {
+                "current_price": 0.0,
+                "current_ema20": 0.0,
+                "current_macd": 0.0,
+                "current_rsi_7": 0.0,
+                "current_rsi_14": 0.0,
+                "open_interest": {"latest": 0.0, "average": 0.0},
+                "funding_rate": 0.0,
+                "mid_prices_3m": [],
+                "ema20_3m": [],
+                "macd_3m": [],
+                "rsi7_3m": [],
+                "rsi14_3m": [],
+                "ema20_4h": 0.0,
+                "ema50_4h": 0.0,
+                "atr3_4h": 0.0,
+                "atr14_4h": 0.0,
+                "volume_current": 0.0,
+                "volume_avg": 0.0,
+                "macd_4h": [],
+                "rsi14_4h": []
+            }
         df_4h = self._get_candles_hl(asset, "4h", 20)  # 20 для буфера
         if df_4h.empty:
             print(f"Warning: No 4h data for {asset}, returning empty dict")
-            return {}
+            # --- ИСПРАВЛЕНО: возвращаем заглушку с ключами ---
+            return {
+                "current_price": 0.0,
+                "current_ema20": 0.0,
+                "current_macd": 0.0,
+                "current_rsi_7": 0.0,
+                "current_rsi_14": 0.0,
+                "open_interest": {"latest": 0.0, "average": 0.0},
+                "funding_rate": 0.0,
+                "mid_prices_3m": [],
+                "ema20_3m": [],
+                "macd_3m": [],
+                "rsi7_3m": [],
+                "rsi14_3m": [],
+                "ema20_4h": 0.0,
+                "ema50_4h": 0.0,
+                "atr3_4h": 0.0,
+                "atr14_4h": 0.0,
+                "volume_current": 0.0,
+                "volume_avg": 0.0,
+                "macd_4h": [],
+                "rsi14_4h": []
+            }
 
         # 2. Считаем индикаторы
         df_3m = self._calculate_indicators(df_3m, period_rsi=7)
@@ -215,6 +239,27 @@ class MarketFetcher:
                 time.sleep(0.5)  # избегаем рейт-лимитов
             except Exception as e:
                 print(f"Error fetching {asset}: {e}")
-                # Возвращаем пустую заглушку, чтобы не ломать цикл
-                result[asset] = {}
+                # --- ИСПРАВЛЕНО: возвращаем заглушку с ключами ---
+                result[asset] = {
+                    "current_price": 0.0,
+                    "current_ema20": 0.0,
+                    "current_macd": 0.0,
+                    "current_rsi_7": 0.0,
+                    "current_rsi_14": 0.0,
+                    "open_interest": {"latest": 0.0, "average": 0.0},
+                    "funding_rate": 0.0,
+                    "mid_prices_3m": [],
+                    "ema20_3m": [],
+                    "macd_3m": [],
+                    "rsi7_3m": [],
+                    "rsi14_3m": [],
+                    "ema20_4h": 0.0,
+                    "ema50_4h": 0.0,
+                    "atr3_4h": 0.0,
+                    "atr14_4h": 0.0,
+                    "volume_current": 0.0,
+                    "volume_avg": 0.0,
+                    "macd_4h": [],
+                    "rsi14_4h": []
+                }
         return result

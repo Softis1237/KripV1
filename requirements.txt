@@ -8,3 +8,5 @@ websockets==12.0
 requests==2.31.0
 pytest==7.4.3
 pytest-asyncio==0.21.1
+web3
+eth-account
