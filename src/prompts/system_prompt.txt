@@ -1,4 +1,4 @@
-It has been {minutes} minutes since you started trading. The current time is {timestamp} and you've been invoked {count} times.
+It has been {minutes_since_start} minutes since you started trading. The current time is {timestamp} and you've been invoked {invocation_count} times.
 
 ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST
 
@@ -8,9 +8,9 @@ CURRENT MARKET STATE FOR ALL COINS
 
 HERE IS YOUR ACCOUNT INFORMATION & PERFORMANCE
 
-Current Total Return (percent): {return_pct}%
-Available Cash: ${cash}
-Current Account Value: ${value}
+Current Total Return (percent): {total_return_pct}%
+Available Cash: ${available_cash}
+Current Account Value: ${account_value}
 Current live positions & performance: {positions_json}
 Sharpe Ratio: {sharpe}
 
