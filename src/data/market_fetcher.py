@@ -49,30 +49,30 @@ class MarketFetcher:
         resp = requests.post(self.info_url, json=payload)
         if resp.status_code != 200:
             print(f"Error fetching candles for {asset} ({interval}): {resp.status_code} - {resp.text}")
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            return pd.DataFrame(columns=['t', 'o', 'h', 'l', 'c', 'v'])
 
         data = resp.json()
         if not isinstance(data, list) or len(data) == 0:
             print(f"Warning: No candle data returned for {asset} ({interval})")
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            return pd.DataFrame(columns=['t', 'o', 'h', 'l', 'c', 'v'])
 
         df = pd.DataFrame(data, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-        df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.sort_values('timestamp').reset_index(drop=True)
-        for col in ['open', 'high', 'low', 'close', 'volume']:
+        # df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume'] # Уже правильные имена
+        df['t'] = pd.to_datetime(df['t'], unit='ms')
+        df = df.sort_values('t').reset_index(drop=True)
+        for col in ['o', 'h', 'l', 'c', 'v']:
             df[col] = pd.to_numeric(df[col])
         return df
 
     def _calculate_indicators(self, df: pd.DataFrame, period_rsi: int = 14) -> pd.DataFrame:
         """Добавляет EMA20, MACD, RSI, ATR"""
         df = df.copy()
-        df['ema20'] = EMAIndicator(close=df['close'], window=20).ema_indicator()
-        df['rsi'] = RSIIndicator(close=df['close'], window=period_rsi).rsi()
+        df['ema20'] = EMAIndicator(close=df['c'], window=20).ema_indicator()
+        df['rsi'] = RSIIndicator(close=df['c'], window=period_rsi).rsi()
 
-        macd_indicator = MACD(close=df['close'])
+        macd_indicator = MACD(close=df['c'])
         df['macd'] = macd_indicator.macd()
-        df['atr'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
+        df['atr'] = AverageTrueRange(high=df['h'], low=df['l'], close=df['c'], window=14).average_true_range()
 
         return df
 
@@ -93,24 +93,40 @@ class MarketFetcher:
         if coin_idx is None:
             raise ValueError(f"Asset {asset} not found in Hyperliquid universe")
 
-        # Open Interest
-        oi_resp = requests.post(self.info_url, json={"type": "openInterest"})
+        # --- ИСПРАВЛЕНО: Open Interest ---
+        oi_resp = requests.post(self.info_url, json={"type": "metaAndAssetCtxs"})
         if oi_resp.status_code != 200:
-            raise Exception(f"Error fetching open interest for {asset}")
+            print(f"Error fetching metaAndAssetCtxs for {asset}: {oi_resp.text}")
+            # Возвращаем заглушки, чтобы не ломать цикл
+            return {
+                "open_interest": {"latest": 0.0, "average": 0.0},
+                "funding_rate": 0.0
+            }
         oi_data = oi_resp.json()
-        latest_oi = float(oi_data['result'][coin_idx]['openInterest'])
+        # Теперь структура: [{"assetCtx": {...}, "meta": {...}}, ...]
+        # Берём нужный индекс
+        asset_ctx = oi_data['assetCtxs'][coin_idx]
+        latest_oi = float(asset_ctx['openInterest'])
 
-        # Funding Rate
-        funding_resp = requests.post(self.info_url, json={"type": "funding"})
+        # --- ИСПРАВЛЕНО: Funding Rate ---
+        funding_resp = requests.post(self.info_url, json={"type": "metaAndAssetCtxs"})
         if funding_resp.status_code != 200:
-            raise Exception(f"Error fetching funding rate for {asset}")
+            print(f"Error fetching funding (metaAndAssetCtxs) for {asset}: {funding_resp.text}")
+            # Возвращаем заглушки
+            return {
+                "open_interest": {"latest": latest_oi, "average": latest_oi * 0.99},
+                "funding_rate": 0.0
+            }
         funding_data = funding_resp.json()
-        funding_rate = float(funding_data['result'][coin_idx]['funding'])
+        # fundingRate возвращается в формате строки, например "0.00001234"
+        funding_rate_str = funding_data['assetCtxs'][coin_idx]['funding']
+        funding_rate = float(funding_rate_str)
 
         return {
             "open_interest": {"latest": latest_oi, "average": latest_oi * 0.99},  # Заглушка для среднего
             "funding_rate": funding_rate
         }
+
 
     def _trim_to_10(self, series: List) -> List:
         """Оставляет последние 10 значений, но в порядке oldest → newest"""
@@ -134,7 +150,7 @@ class MarketFetcher:
         df_4h = self._calculate_indicators(df_4h, period_rsi=14)
 
         # 3. Текущие значения (последние)
-        current_price = float(df_3m['close'].iloc[-1])
+        current_price = float(df_3m['c'].iloc[-1])
         current_ema20 = float(df_3m['ema20'].iloc[-1])
         current_macd = float(df_3m['macd'].iloc[-1])
         current_rsi_7 = float(df_3m['rsi'].iloc[-1])  # Это RSI7
@@ -142,7 +158,7 @@ class MarketFetcher:
         current_rsi_14 = float(df_3m_with_rsi14['rsi'].iloc[-1])
 
         # 4. Ряды (последние 10, oldest → newest)
-        mid_prices_3m = self._trim_to_10(df_3m['close'].tolist())
+        mid_prices_3m = self._trim_to_10(df_3m['c'].tolist())
         ema20_3m = self._trim_to_10(df_3m['ema20'].tolist())
         macd_3m = self._trim_to_10(df_3m['macd'].fillna(0.0).tolist())
         rsi7_3m = self._trim_to_10(df_3m['rsi'].fillna(0.0).tolist())
@@ -152,12 +168,12 @@ class MarketFetcher:
         # 4h данные
         ema20_4h = float(df_4h['ema20'].iloc[-1])
         df_4h_with_ema50 = df_4h.copy()
-        df_4h_with_ema50['ema50'] = EMAIndicator(close=df_4h_with_ema50['close'], window=50).ema_indicator()
+        df_4h_with_ema50['ema50'] = EMAIndicator(close=df_4h_with_ema50['c'], window=50).ema_indicator()
         ema50_4h = float(df_4h_with_ema50['ema50'].iloc[-1])
-        atr3_4h = float(AverageTrueRange(high=df_4h['high'], low=df_4h['low'], close=df_4h['close'], window=3).average_true_range().iloc[-1])
+        atr3_4h = float(AverageTrueRange(high=df_4h['h'], low=df_4h['l'], close=df_4h['c'], window=3).average_true_range().iloc[-1])
         atr14_4h = float(df_4h['atr'].iloc[-1])  # уже рассчитан как ATR14
-        volume_current_4h = float(df_4h['volume'].iloc[-1])
-        volume_avg_4h = float(df_4h['volume'].mean())
+        volume_current_4h = float(df_4h['v'].iloc[-1])
+        volume_avg_4h = float(df_4h['v'].mean())
 
         df_4h_with_macd = self._calculate_indicators(df_4h, period_rsi=14)
         macd_4h_series = self._trim_to_10(df_4h_with_macd['macd'].fillna(0.0).tolist())
