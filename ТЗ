@@ -1,0 +1,273 @@
+## 🎯 Цель проекта
+
+Создать **автономных торговых агентов на основе LLM** (DeepSeek, Qwen и др.), которые:
+- Получают **реальные рыночные данные** (цены, индикаторы, позиции)
+- **Сами принимают решения** через рассуждения (chain-of-thought)
+- Торгуют **на Hyperliquid perpetuals** (BTC, ETH, SOL, XRP, DOGE, BNB)
+- Управляют **стоп-лоссом, тейк-профитом и левериджем**
+- Работают **без вмешательства человека**
+- Логируют **всё в публичном, воспроизводимом формате**
+
+> 💡 Это **не алготрейдинг**. Это **LLM-агенты в реальном мире**.
+
+---
+
+## 🧱 Архитектура системы (с нуля)
+
+```
+alpha-arena/
+├── agents/
+│   └── llm_agent.py                # Основной агент
+├── data/
+│   ├── market_fetcher.py           # Сбор цен и индикаторов
+│   └── account_state.py            # Состояние счёта (позиции, баланс)
+├── core/
+│   ├── hyperliquid.py              # API для торговли
+│   └── llm_client.py               # Вызов LLM (DeepSeek, Qwen)
+├── prompts/
+│   └── system_prompt.txt           # Точный промпт как у nof1.ai
+├── logs/
+│   └── {agent_name}/{timestamp}.json  # Публичные логи
+├── config/
+│   └── agents.json                 # Конфиг: ключи, капитал, интервал
+├── run.py                          # Точка входа
+└── requirements.txt
+```
+
+> ❌ Нет `strategies/`, нет `models/`, нет ручной логики принятия решений.
+
+---
+
+## 🔹 Шаг 1. Сбор рыночных данных (`data/market_fetcher.py`)
+
+Для **каждого актива** (BTC, ETH, SOL, XRP, DOGE, BNB) собирать:
+
+### A. Текущие значения:
+- `price`
+- `ema20` (20-period EMA)
+- `macd`
+- `rsi_7`, `rsi_14`
+- `open_interest` (latest, average)
+- `funding_rate`
+
+### B. Временные ряды (последние 10 точек, oldest → newest):
+- **3-минутные**:  
+  `mid_prices`, `ema20`, `macd`, `rsi_7`, `rsi_14`
+- **4-часовые**:  
+  `ema20`, `ema50`, `atr3`, `atr14`, `volume`, `macd`, `rsi_14`
+
+> ⚠️ Все ряды — **ровно 10 значений**. Используй библиотеку `ta` (Technical Analysis Library) для расчёта индикаторов.
+
+---
+
+## 🔹 Шаг 2. Состояние счёта (`data/account_state.py`)
+
+Получать через Hyperliquid API:
+- `available_balance`
+- `total_account_value`
+- `total_return_pct`
+- `sharpe_ratio` (можно рассчитывать локально)
+- Список позиций:  
+  ```json
+  {
+    "symbol": "ETH",
+    "quantity": 22.66,
+    "entry_price": 4191.2,
+    "current_price": 4146.85,
+    "leverage": 25,
+    "unrealized_pnl": -1004.97,
+    "exit_plan": {
+      "profit_target": 4280.0,
+      "stop_loss": 4120.0,
+      "invalidation_condition": "4h close below 4018.868"
+    }
+  }
+  ```
+
+---
+
+## 🔹 Шаг 3. Промпт (`prompts/system_prompt.txt`)
+
+```text
+It has been {minutes} minutes since you started trading. The current time is {timestamp} and you've been invoked {count} times.
+
+ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST
+
+CURRENT MARKET STATE FOR ALL COINS
+
+{market_data_block}
+
+HERE IS YOUR ACCOUNT INFORMATION & PERFORMANCE
+
+Current Total Return (percent): {return_pct}%
+Available Cash: ${cash}
+Current Account Value: ${value}
+Current live positions & performance: {positions_json}
+Sharpe Ratio: {sharpe}
+
+You are an autonomous trading agent. Trade ONLY BTC, ETH, SOL, XRP, DOGE, and BNB perpetuals on Hyperliquid.
+
+RULES:
+- Every position MUST have:
+  • a take-profit target
+  • a stop-loss or invalidation condition (e.g., "4h close below X")
+- Use 10x–20x leverage
+- NEVER remove stops
+- NEVER trade other assets
+
+Respond in this EXACT format:
+
+▶
+CHAIN_OF_THOUGHT
+{ "COIN": { "signal": "HOLD/BUY/SELL", "justification": "...", "confidence": 0.85, "leverage": 15, "stop_loss": ..., "profit_target": ..., "invalidation_condition": "...", "risk_usd": ... } }
+
+▶
+TRADING_DECISIONS
+COIN
+ACTION
+CONFIDENCE%
+Justification...
+
+QUANTITY: {qty}
+```
+
+---
+
+## 🔹 Шаг 4. Вызов LLM (`core/llm_client.py`)
+
+Поддержка провайдеров:
+- **DeepSeek V3.1**: через OpenRouter (`model: "deepseek-chat"`)
+- **Qwen 3 Max**: через Alibaba Cloud (`model: "qwen-max"`)
+
+Параметры:
+- `temperature = 0.1`
+- `max_tokens = 500`
+- `response_format = {"type": "json_object"}` (если поддерживается)
+
+---
+
+## 🔹 Шаг 5. Агент (`agents/llm_agent.py`)
+
+```python
+class LLMAgent:
+    def __init__(self, name: str, config: dict):
+        self.name = name
+        self.config = config
+        self.hyperliquid = HyperliquidClient(config)
+        self.llm = LLMClient(config["model"], config["api_key"])
+        self.invocation_count = 0
+        self.start_time = time.time()
+
+    def run_cycle(self):
+        # 1. Собрать данные
+        market = MarketFetcher().get_all_assets()
+        account = AccountState().get()
+        
+        # 2. Сформировать промпт
+        prompt = self.build_prompt(market, account)
+        
+        # 3. Вызвать LLM
+        response = self.llm.call(prompt)
+        
+        # 4. Распарсить решение
+        decision = self.parse_decision(response)
+        
+        # 5. Исполнить (если нужно)
+        if decision and decision["signal"] != "HOLD":
+            self.execute_decision(decision)
+        
+        # 6. Залогировать
+        self.log_cycle(market, account, response, decision)
+
+    def run(self):
+        while True:
+            self.run_cycle()
+            time.sleep(self.config["interval_sec"])
+```
+
+---
+
+## 🔹 Шаг 6. Исполнение (`core/hyperliquid.py`)
+
+- Открытие позиции → **основной ордер**
+- Сразу после → **stop-loss** и **take-profit** как **reduce-only GTC ордера**
+- При закрытии — отмена всех связанных ордеров
+
+---
+
+## 🔹 Шаг 7. Логирование
+
+Каждый цикл → `logs/{agent}/{timestamp}.json` с полями:
+- `timestamp`
+- `market_context` (всё как в промпте)
+- `account_state`
+- `llm_response_raw`
+- `parsed_decision`
+- `executed_orders`
+- `errors`
+
+> Это позволяет **полностью воспроизвести** поведение агента — как на nof1.ai.
+
+---
+
+## 🔹 Шаг 8. Конфигурация (`config/agents.json`)
+
+```json
+{
+  "agents": {
+    "deepseek_v3": {
+      "model": "deepseek-chat",
+      "provider": "openrouter",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "capital_usd": 100,
+      "interval_sec": 600,
+      "max_leverage": 20,
+      "allowed_coins": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+    },
+    "qwen_max": {
+      "model": "qwen-max",
+      "provider": "alibaba",
+      "api_key_env": "QWEN_API_KEY",
+      "capital_usd": 100,
+      "interval_sec": 600,
+      "max_leverage": 20,
+      "allowed_coins": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+    }
+  }
+}
+```
+
+---
+
+## 🔹 Шаг 9. Запуск (`run.py`)
+
+```python
+from agents.llm_agent import LLMAgent
+from config import load_config
+
+config = load_config("agents.json")
+for name, cfg in config["agents"].items():
+    agent = LLMAgent(name, cfg)
+    # Запустить в фоне (thread или process)
+```
+
+---
+
+## 🔹 Шаг 10. Безопасность и тестирование
+
+- Начинать в **paper trading** (тестовая среда Hyperliquid)
+- Ограничить **максимальный размер позиции** (≤20% капитала)
+- Валидировать **все ордера** перед отправкой
+- Писать **unit-тесты** на парсинг, формат промпта, расчёт индикаторов
+
+---
+
+## 💡 Итог
+
+После реализации этого ТЗ ты получишь:
+- **Точную копию архитектуры nof1.ai**
+- **Реально работающих LLM-агентов**
+- Возможность **масштабировать капитал** при успехе
+- **Прозрачную, воспроизводимую систему**
+
+---
