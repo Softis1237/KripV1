@@ -1,71 +1,204 @@
+# src/data/market_fetcher.py
 
-import aiohttp
+import requests
 import pandas as pd
 import numpy as np
-from ta.trend import EMAIndicator, MACD
+from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
+from ta.trend import MACD
 from ta.volatility import AverageTrueRange
 from typing import Dict, List
 import time
-import logging
-import asyncio
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class MarketFetcher:
-    def __init__(self, assets: List[str] | None = None):
-        """Initialize MarketFetcher with a list of assets to track"""
-        self.assets = assets if assets is not None else ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
-        self.api_base_url = "https://api.binance.com/api/v3"
-        self.session = None
-        self.logger = logger
-        
-    async def __aenter__(self):
-        """Create aiohttp session when entering context"""
-        self.session = aiohttp.ClientSession()
-        return self
-        
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        """Close aiohttp session when exiting context"""
-        if self.session:
-            await self.session.close()
-            
-    async def _init_session(self):
-        """Initialize aiohttp session if not exists"""
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
+    def __init__(self, assets: List[str] = None):
+        self.assets = assets or ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+        self.base_url = "https://api.hyperliquid.xyz"
+        self.info_url = f"{self.base_url}/info"
 
-    async def _get_current_price(self, symbol: str) -> float:
-        """Get current price for an asset"""
-        try:
-            await self._init_session()
-            self.logger.info(f"Fetching data for {symbol}...")
-            url = f"{self.api_base_url}/info/markets"
-            response = await self.session.get(url)
-            data = await response.json()
-            
-            for ticker in data:
-                if ticker['name'] == symbol:
-                    return float(ticker['markPrice'])
-                    
-            self.logger.error(f"Symbol {symbol} not found in response")
-            raise ValueError(f"Symbol {symbol} not found in response")
-            
-        except Exception as e:
-            self.logger.error(f"Error fetching data for {symbol}: {e}")
-            raise
+    def _get_candles_hl(self, asset: str, interval: str, n_candles: int) -> pd.DataFrame:
+        """
+        Получает свечи через Hyperliquid info API (candleSnapshot).
+        interval: '1m', '3m', '1h', '4h'
+        """
+        # Определим startTime и endTime примерно
+        now_ms = int(time.time() * 1000)
+        # Примерно: n_candles * interval в миллисекундах
+        interval_to_ms = {
+            "1m": 60 * 1000,
+            "3m": 3 * 60 * 1000,
+            "1h": 60 * 60 * 1000,
+            "4h": 4 * 60 * 60 * 1000
+        }
+        if interval not in interval_to_ms:
+            raise ValueError(f"Unsupported interval: {interval}")
 
-    async def get_all_assets(self) -> Dict:
-        """Gets current data for all allowed assets."""
-        results = {}
-        for symbol in self.assets:
+        total_ms = n_candles * interval_to_ms[interval]
+        start_time = now_ms - total_ms
+
+        payload = {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": asset,
+                "interval": interval,
+                "startTime": start_time,
+                "endTime": now_ms
+            }
+        }
+
+        resp = requests.post(self.info_url, json=payload)
+        if resp.status_code != 200:
+            print(f"Error fetching candles for {asset} ({interval}): {resp.status_code} - {resp.text}")
+            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+        data = resp.json()
+        if not isinstance(data, list) or len(data) == 0:
+            print(f"Warning: No candle data returned for {asset} ({interval})")
+            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+        df = pd.DataFrame(data, columns=['t', 'o', 'h', 'l', 'c', 'v'])
+        df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.sort_values('timestamp').reset_index(drop=True)
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col])
+        return df
+
+    def _calculate_indicators(self, df: pd.DataFrame, period_rsi: int = 14) -> pd.DataFrame:
+        """Добавляет EMA20, MACD, RSI, ATR"""
+        df = df.copy()
+        df['ema20'] = EMAIndicator(close=df['close'], window=20).ema_indicator()
+        df['rsi'] = RSIIndicator(close=df['close'], window=period_rsi).rsi()
+
+        macd_indicator = MACD(close=df['close'])
+        df['macd'] = macd_indicator.macd()
+        df['atr'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=14).average_true_range()
+
+        return df
+
+    def _get_funding_and_oi(self, asset: str) -> Dict:
+        """Получает funding rate и open interest через Hyperliquid API"""
+        # Получим индекс актива
+        meta_resp = requests.post(self.info_url, json={"type": "meta"})
+        if meta_resp.status_code != 200:
+            raise Exception("Error fetching meta from Hyperliquid")
+        meta = meta_resp.json()
+
+        coin_idx = None
+        for i, coin in enumerate(meta['universe']):
+            if coin['name'] == asset:
+                coin_idx = i
+                break
+
+        if coin_idx is None:
+            raise ValueError(f"Asset {asset} not found in Hyperliquid universe")
+
+        # Open Interest
+        oi_resp = requests.post(self.info_url, json={"type": "openInterest"})
+        if oi_resp.status_code != 200:
+            raise Exception(f"Error fetching open interest for {asset}")
+        oi_data = oi_resp.json()
+        latest_oi = float(oi_data['result'][coin_idx]['openInterest'])
+
+        # Funding Rate
+        funding_resp = requests.post(self.info_url, json={"type": "funding"})
+        if funding_resp.status_code != 200:
+            raise Exception(f"Error fetching funding rate for {asset}")
+        funding_data = funding_resp.json()
+        funding_rate = float(funding_data['result'][coin_idx]['funding'])
+
+        return {
+            "open_interest": {"latest": latest_oi, "average": latest_oi * 0.99},  # Заглушка для среднего
+            "funding_rate": funding_rate
+        }
+
+    def _trim_to_10(self, series: List) -> List:
+        """Оставляет последние 10 значений, но в порядке oldest → newest"""
+        return series[-10:] if len(series) >= 10 else series
+
+    def get_asset_data(self, asset: str) -> Dict:
+        """Собирает полный блок данных по одному активу, как у nof1.ai"""
+        # 1. Получаем 30 минут (для 3m) и 40 часов (для 4h) данных
+        df_3m = self._get_candles_hl(asset, "3m", 20)  # 20 для буфера
+        if df_3m.empty:
+            print(f"Warning: No 3m data for {asset}, returning empty dict")
+            return {}
+        df_4h = self._get_candles_hl(asset, "4h", 20)  # 20 для буфера
+        if df_4h.empty:
+            print(f"Warning: No 4h data for {asset}, returning empty dict")
+            return {}
+
+        # 2. Считаем индикаторы
+        df_3m = self._calculate_indicators(df_3m, period_rsi=7)
+        df_3m = self._calculate_indicators(df_3m, period_rsi=14)
+        df_4h = self._calculate_indicators(df_4h, period_rsi=14)
+
+        # 3. Текущие значения (последние)
+        current_price = float(df_3m['close'].iloc[-1])
+        current_ema20 = float(df_3m['ema20'].iloc[-1])
+        current_macd = float(df_3m['macd'].iloc[-1])
+        current_rsi_7 = float(df_3m['rsi'].iloc[-1])  # Это RSI7
+        df_3m_with_rsi14 = self._calculate_indicators(df_3m, period_rsi=14)
+        current_rsi_14 = float(df_3m_with_rsi14['rsi'].iloc[-1])
+
+        # 4. Ряды (последние 10, oldest → newest)
+        mid_prices_3m = self._trim_to_10(df_3m['close'].tolist())
+        ema20_3m = self._trim_to_10(df_3m['ema20'].tolist())
+        macd_3m = self._trim_to_10(df_3m['macd'].fillna(0.0).tolist())
+        rsi7_3m = self._trim_to_10(df_3m['rsi'].fillna(0.0).tolist())
+        df_3m_with_rsi14 = self._calculate_indicators(df_3m, period_rsi=14)
+        rsi14_3m = self._trim_to_10(df_3m_with_rsi14['rsi'].fillna(0.0).tolist())
+
+        # 4h данные
+        ema20_4h = float(df_4h['ema20'].iloc[-1])
+        df_4h_with_ema50 = df_4h.copy()
+        df_4h_with_ema50['ema50'] = EMAIndicator(close=df_4h_with_ema50['close'], window=50).ema_indicator()
+        ema50_4h = float(df_4h_with_ema50['ema50'].iloc[-1])
+        atr3_4h = float(AverageTrueRange(high=df_4h['high'], low=df_4h['low'], close=df_4h['close'], window=3).average_true_range().iloc[-1])
+        atr14_4h = float(df_4h['atr'].iloc[-1])  # уже рассчитан как ATR14
+        volume_current_4h = float(df_4h['volume'].iloc[-1])
+        volume_avg_4h = float(df_4h['volume'].mean())
+
+        df_4h_with_macd = self._calculate_indicators(df_4h, period_rsi=14)
+        macd_4h_series = self._trim_to_10(df_4h_with_macd['macd'].fillna(0.0).tolist())
+        rsi14_4h_series = self._trim_to_10(df_4h_with_macd['rsi'].fillna(0.0).tolist())
+
+        # 5. Метаданные
+        meta = self._get_funding_and_oi(asset)
+
+        return {
+            "current_price": current_price,
+            "current_ema20": current_ema20,
+            "current_macd": current_macd,
+            "current_rsi_7": current_rsi_7,
+            "current_rsi_14": current_rsi_14,
+            "open_interest": meta["open_interest"],
+            "funding_rate": meta["funding_rate"],
+            "mid_prices_3m": [float(x) for x in mid_prices_3m],
+            "ema20_3m": [float(x) for x in ema20_3m],
+            "macd_3m": [float(x) for x in macd_3m],
+            "rsi7_3m": [float(x) for x in rsi7_3m],
+            "rsi14_3m": [float(x) for x in rsi14_3m],
+            "ema20_4h": ema20_4h,
+            "ema50_4h": ema50_4h,
+            "atr3_4h": atr3_4h,
+            "atr14_4h": atr14_4h,
+            "volume_current": volume_current_4h,
+            "volume_avg": volume_avg_4h,
+            "macd_4h": [float(x) for x in macd_4h_series],
+            "rsi14_4h": [float(x) for x in rsi14_4h_series]
+        }
+
+    def get_all_assets(self) -> Dict[str, Dict]:
+        """Возвращает данные по всем активам"""
+        result = {}
+        for asset in self.assets:
             try:
-                current_price = await self._get_current_price(symbol)
-                results[symbol] = {
-                    'current_price': current_price
-                }
+                print(f"Fetching data for {asset}...")
+                result[asset] = self.get_asset_data(asset)
+                time.sleep(0.5)  # избегаем рейт-лимитов
             except Exception as e:
-                self.logger.error(f"Error fetching {symbol}: {str(e)}")
-                continue
-        return results
+                print(f"Error fetching {asset}: {e}")
+                # Возвращаем пустую заглушку, чтобы не ломать цикл
+                result[asset] = {}
+        return result
