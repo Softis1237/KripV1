@@ -31,18 +31,20 @@ class BaseExchange(ABC):
         pass
 
     @abstractmethod
-    def place_order(self, symbol: str, side: str, quantity: float, limit_px: float, order_type: str = "limit", reduce_only: bool = False) -> Optional[Dict[str, Any]]:
+    def place_order(self, coin: str, is_buy: bool, sz: float, limit_px: float, order_type: str = "limit", reduce_only: bool = False) -> Optional[Dict[str, Any]]:
         """
         Размещает ордер.
         """
         pass
 
+    # --- ДОБАВИМ ЭТОТ АБСТРАКТНЫЙ МЕТОД ---
     @abstractmethod
     def cancel_order(self, order_id: str, symbol: str) -> Optional[Dict[str, Any]]:
         """
         Отменяет ордер.
         """
         pass
+    # --- КОНЕЦ ДОБАВЛЕНИЯ ---
 
     @abstractmethod
     def get_klines(self, symbol: str, interval: str, limit: int) -> List[Dict[str, Any]]:

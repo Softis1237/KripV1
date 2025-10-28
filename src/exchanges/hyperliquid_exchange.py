@@ -62,13 +62,45 @@ class HyperliquidExchange(BaseExchange):
             print("Failed to decode JSON response")
             return None
 
+    def _post_info(self, payload: Dict[str, Any]) -> Optional[Any]:
+        """
+        Performs an unsigned POST request to the /info endpoint.
+        """
+        try:
+            response = requests.post(self.info_url, json=payload)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Info request failed: {response.status_code} - {response.text}")
+                return None
+        except requests.exceptions.RequestException as e:
+            print(f"Info request error: {e}")
+            return None
+        except json.JSONDecodeError:
+            print("Failed to decode JSON response")
+            return None
+
+    def _get_asset_index(self, symbol: str) -> Optional[int]:
+        """
+        Retrieves the asset index for a given symbol from metaAndAssetCtxs.
+        """
+        payload = {"type": "metaAndAssetCtxs"}
+        data = self._post_info(payload)
+        if not data:
+            return None
+        universe = data[0]["universe"]
+        for i, asset in enumerate(universe):
+            if asset["name"] == symbol:
+                return i
+        return None
+
     def get_account_info(self) -> Dict[str, Any]:
-        payload = {"type": "userState", "req": {"user": self.user_address}}
-        response = self._make_request(payload["req"], self.info_url)
+        payload = {"type": "clearinghouseState", "user": self.user_address}
+        response = self._post_info(payload)
         if response:
             # Обработка ответа, например, извлечение accountValue
             margin_summary = response.get("marginSummary", {})
-            account_value = float(margin_summary.get("accountValue", 0.0))
+            account_value = float(margin_summary.get("accountValue", response.get("accountValue", 0.0)))
             # ... другие поля ...
             return {
                 "accountValue": account_value,
@@ -77,39 +109,49 @@ class HyperliquidExchange(BaseExchange):
         return {}
 
     def get_positions(self) -> List[Dict[str, Any]]:
-        payload = {"type": "userState", "req": {"user": self.user_address}}
-        response = self._make_request(payload["req"], self.info_url)
+        payload = {"type": "clearinghouseState", "user": self.user_address}
+        response = self._post_info(payload)
         if response:
-            positions_raw = response.get("positions", [])
+            positions_raw = response.get("assetPositions", [])
             # Преобразуем из формата HL в общий формат
             positions = []
             for pos in positions_raw:
-                if float(pos.get("positionValue", 0)) != 0: # Только открытые
+                position_value = float(pos.get("positionValue", 0))
+                if position_value != 0: # Только открытые
+                    szi = float(pos.get("szi", 0))
+                    side = "LONG" if szi > 0 else "SHORT"
+                    quantity = abs(szi)
+                    entry_price = float(pos["entryPx"])
+                    leverage_obj = pos.get("leverage", {"value": 1})
+                    leverage = float(leverage_obj.get("value", 1))
+                    unrealized_pnl = float(pos["unrealizedPnl"])
+                    liquidation_price = float(pos.get("liquidationPx", 0.0))
                     positions.append({
                         "symbol": pos["coin"],
-                        "side": "LONG" if float(pos["szi"]) > 0 else "SHORT",
-                        "quantity": abs(float(pos["szi"])),
-                        "entryPrice": float(pos["entryPx"]),
-                        "leverage": float(pos["leverage"]),
-                        "unrealizedPnl": float(pos["unrealizedPnl"]),
-                        "liquidationPrice": float(pos.get("liquidationPx", 0.0))
+                        "side": side,
+                        "quantity": quantity,
+                        "entryPrice": entry_price,
+                        "leverage": leverage,
+                        "unrealizedPnl": unrealized_pnl,
+                        "liquidationPrice": liquidation_price
                     })
             return positions
         return []
 
     def get_all_mids(self) -> Dict[str, float]:
         payload = {"type": "allMids"}
-        try:
-            response = requests.post(self.info_url, json=payload)
-            if response.status_code == 200:
-                data = response.json()
-                # Преобразуем строки в float
-                return {k: float(v) for k, v in data.items()}
-        except Exception as e:
-            print(f"Error fetching mids: {e}")
+        data = self._post_info(payload)
+        if data:
+            # Преобразуем строки в float
+            return {k: float(v) for k, v in data.items()}
         return {}
 
     def place_order(self, symbol: str, side: str, quantity: float, limit_px: float, order_type: str = "limit", reduce_only: bool = False) -> Optional[Dict[str, Any]]:
+        asset_idx = self._get_asset_index(symbol)
+        if asset_idx is None:
+            print(f"[Hyperliquid] Unknown symbol: {symbol}")
+            return None
+
         if order_type.lower() != "limit":
             print("Hyperliquid client only implements limit orders in this example.")
             # Для рыночных ордеров нужно другое поле
@@ -117,16 +159,17 @@ class HyperliquidExchange(BaseExchange):
         else:
             order_type_obj = {"limit": {"tif": "Gtc"}}
 
+        req = {
+            "asset": asset_idx,
+            "isBuy": side.upper() == "BUY",
+            "sz": quantity,
+            "limitPx": limit_px,
+            "orderType": order_type_obj,
+            "reduceOnly": reduce_only,
+        }
         payload = {
             "type": "order",
-            "req": {
-                "asset": symbol,
-                "isBuy": side.upper() == "BUY",
-                "sz": quantity,
-                "limitPx": limit_px,
-                "orderType": order_type_obj,
-                "reduceOnly": reduce_only,
-            }
+            "req": req
         }
         print(f"[Hyperliquid] Placing {side.upper()} order for {quantity} {symbol} @ {limit_px}")
         return self._make_request(payload["req"], self.exchange_url)
@@ -149,48 +192,44 @@ class HyperliquidExchange(BaseExchange):
                 "num": limit
             }
         }
-        try:
-            response = requests.post(self.info_url, json=payload)
-            if response.status_code == 200:
-                data = response.json()
-                # Формат: [{"t": timestamp, "o": open, "h": high, "l": low, "c": close, "v": volume}, ...]
-                # Преобразуем поля в числа
-                for item in data:
-                    for key in ['t', 'o', 'h', 'l', 'c', 'v']:
+        raw_data = self._post_info(payload) # Вместо прямого requests.post
+        if raw_data and isinstance(raw_data, list):
+            # Преобразуем поля в числа
+            for item in raw_data:
+                for key in ['t', 'o', 'h', 'l', 'c', 'v']:
+                    if key in item:
                         item[key] = float(item[key])
-                return data
-        except Exception as e:
-            print(f"Error fetching klines for {symbol}: {e}")
+            return raw_data
         return []
 
     def get_funding_rate(self, symbol: str) -> Optional[float]:
-        # Используем metaAndAssetCtxs
         try:
-            resp = requests.post(self.info_url, json={"type": "metaAndAssetCtxs"})
-            if resp.status_code == 200:
-                data = resp.json()
-                universe = data[0]["universe"]
-                asset_ctxs = data[1]
-                coin_idx = next((i for i, x in enumerate(universe) if x["name"] == symbol), None)
-                if coin_idx is not None:
-                    funding_str = asset_ctxs[coin_idx]["funding"]
-                    return float(funding_str)
-        except Exception as e:
-            print(f"Error fetching funding rate for {symbol}: {e}")
+            payload = {"type": "metaAndAssetCtxs"}
+            data = self._post_info(payload) # Вместо прямого requests.post
+            if not data:
+                return None
+            universe = data[0]["universe"]
+            asset_ctxs = data[1]
+            coin_idx = next((i for i, x in enumerate(universe) if x["name"] == symbol), None)
+            if coin_idx is not None:
+                funding_str = asset_ctxs[coin_idx]["funding"]
+                return float(funding_str)
+        except (IndexError, KeyError, ValueError, TypeError) as e:
+            print(f"[Hyperliquid] Error fetching funding rate for {symbol}: {e}")
         return None
 
     def get_open_interest(self, symbol: str) -> Optional[float]:
-        # Используем metaAndAssetCtxs
         try:
-            resp = requests.post(self.info_url, json={"type": "metaAndAssetCtxs"})
-            if resp.status_code == 200:
-                data = resp.json()
-                universe = data[0]["universe"]
-                asset_ctxs = data[1]
-                coin_idx = next((i for i, x in enumerate(universe) if x["name"] == symbol), None)
-                if coin_idx is not None:
-                    oi = asset_ctxs[coin_idx]["openInterest"]
-                    return float(oi)
-        except Exception as e:
-            print(f"Error fetching open interest for {symbol}: {e}")
+            payload = {"type": "metaAndAssetCtxs"}
+            data = self._post_info(payload) # Вместо прямого requests.post
+            if not data:
+                return None
+            universe = data[0]["universe"]
+            asset_ctxs = data[1]
+            coin_idx = next((i for i, x in enumerate(universe) if x["name"] == symbol), None)
+            if coin_idx is not None:
+                oi = asset_ctxs[coin_idx]["openInterest"]
+                return float(oi)
+        except (IndexError, KeyError, ValueError, TypeError) as e:
+            print(f"[Hyperliquid] Error fetching open interest for {symbol}: {e}")
         return None

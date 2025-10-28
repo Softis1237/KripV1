@@ -1,32 +1,46 @@
 {
   "agents": {
     "bingx_deepseek_agent": {
-      "model": "deepseek-chat",          
-      "provider": "openrouter",          
-      "api_key_env": "DEEPSEEK_API_KEY", 
-      "capital_usd": 100,                
-      "interval_sec": 600,               
-      "max_leverage": 20,                
-      "paper_trading": false,            
+      "model": "deepseek-chat",
+      "provider": "openrouter",
+      "llm_api_key_env": "DEEPSEEK_API_KEY",
+      "capital_usd": 100,
+      "interval_sec": 600,
+      "max_leverage": 20,
+      "paper_trading": false,
       "allowed_coins": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],
-      "broker": "bingx",                
-      "api_key_env": "BINGX_API_KEY",    
-      "api_secret_env": "BINGX_SECRET_KEY", 
-      "is_testnet": false                
+      "broker": "bingx",
+      "exchange_api_key_env": "BINGX_API_KEY", 
+      "exchange_api_secret_env": "BINGX_SECRET_KEY", 
+      "is_testnet": false
     },
     "bingx_qwen_agent": {
-      "model": "qwen-max",               
-      "provider": "alibaba",             
-      "api_key_env": "QWEN_API_KEY",     
-      "capital_usd": 100,               
-      "interval_sec": 600,              
-      "max_leverage": 20,                
-      "paper_trading": false,            
+      "model": "qwen-max",
+      "provider": "alibaba",
+      "llm_api_key_env": "QWEN_API_KEY", 
+      "capital_usd": 100,
+      "interval_sec": 600,
+      "max_leverage": 20,
+      "paper_trading": false,
       "allowed_coins": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],
-      "broker": "bingx",                 
-      "api_key_env": "BINGX_API_KEY",    
-      "api_secret_env": "BINGX_SECRET_KEY", 
-      "is_testnet": false                
+      "broker": "bingx",
+      "exchange_api_key_env": "BINGX_API_KEY",
+      "exchange_api_secret_env": "BINGX_SECRET_KEY", 
+      "is_testnet": false
+    },
+    "hl_deepseek_agent": {
+      "model": "deepseek-chat",
+      "provider": "openrouter",
+      "llm_api_key_env": "DEEPSEEK_API_KEY", 
+      "capital_usd": 100,
+      "interval_sec": 600,
+      "max_leverage": 20,
+      "paper_trading": false,
+      "allowed_coins": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],
+      "broker": "hyperliquid",
+      "exchange_wallet_address": "0x000000000000000000000000000000000000dead", 
+      "exchange_private_key_env": "HYPERLIQUID_SECRET", 
+      "is_testnet": false
     }
   }
 }

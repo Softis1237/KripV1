@@ -20,29 +20,34 @@ def main():
 
     for name, cfg in agents.items():
         print(f"Initializing agent: {name}")
-        # 1. Создаём клиента биржи
+        # 1. Создаём клиента LLM
+        llm_client = LLMClient(
+            model_name=cfg["model"],
+            api_key_env=cfg["llm_api_key_env"],
+            provider=cfg.get("provider")
+        )
+
+        # 2. Создаём клиента биржи
         broker = cfg.get("broker", "hyperliquid") # по умолчанию Hyperliquid
+        exchange_client = None
         if broker == "hyperliquid":
             exchange_client = HyperliquidExchange(
-                wallet_address=cfg.get("wallet_address", "0x000000000000000000000000000000000000dead"),
-                private_key_env=cfg.get("private_key_env", "HYPERLIQUID_SECRET"), # Укажи переменную в конфиге
+                wallet_address=cfg.get("exchange_wallet_address", "0x000000000000000000000000000000000000dead"),
+                private_key_env=cfg.get("exchange_private_key_env", "HYPERLIQUID_SECRET"), 
                 is_testnet=cfg.get("is_testnet", False)
             )
         elif broker == "bingx":
             exchange_client = BingXClient(
-                api_key_env=cfg.get("api_key_env", "BINGX_API_KEY"), # Укажи переменные в конфиге
-                secret_key_env=cfg.get("api_secret_env", "BINGX_SECRET_KEY"),
+                api_key_env=cfg.get("exchange_api_key_env", "BINGX_API_KEY"), 
+                secret_key_env=cfg.get("exchange_api_secret_env", "BINGX_SECRET_KEY"), 
                 is_testnet=cfg.get("is_testnet", False)
             )
         else:
             raise ValueError(f"Unsupported broker: {broker}")
 
-        # 2. Создаём клиента LLM
-        llm_client = LLMClient(
-            model_name=cfg["model"],
-            api_key_env=cfg["api_key_env"],
-            provider=cfg.get("provider")
-        )
+        if exchange_client is None:
+            print(f"Failed to create exchange client for agent {name}")
+            continue
 
         # 3. Создаём агента
         agent = LLMAgent(name, cfg, exchange_client, llm_client)

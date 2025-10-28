@@ -148,14 +148,15 @@ class BingXClient(BaseExchange):
                 print(f"Error fetching mid price for {symbol}: {e}")
         return mids
 
-    def place_order(self, symbol: str, side: str, quantity: float, limit_px: float, order_type: str = "LIMIT", reduce_only: bool = False) -> Optional[Dict[str, Any]]:
+    # --- ИЗМЕНЕННЫЙ place_order ---
+    def place_order(self, coin: str, is_buy: bool, sz: float, limit_px: float, order_type: str = "LIMIT", reduce_only: bool = False) -> Optional[Dict[str, Any]]:
         # POST /openApi/swap/v2/trade/order
         endpoint = "/openApi/swap/v2/trade/order"
         body_data = {
-            "symbol": f"{symbol}-USDT", # Важно: формат пары
-            "side": side.upper(),
+            "symbol": f"{coin}-USDT", # Важно: формат пары
+            "side": "BUY" if is_buy else "SELL",
             "type": order_type.upper(),
-            "quantity": quantity,
+            "quantity": sz,
             "price": limit_px,
             "timeInForce": "GTC", # или другой
         }
@@ -165,29 +166,34 @@ class BingXClient(BaseExchange):
         try:
             response_data = self._make_request("POST", endpoint, params=body_data, signed=True)
             print(f"Order placed successfully: {response_data}")
-            return response_data
+            # BingX может вернуть orderId внутри data или напрямую
+            # Пример ответа: {"code":0,"msg":"","data":{"orderId":"12345678901234567890"}}
+            # Вернём структуру, в которой orderId легко найти
+            return response_data # или {'orderId': response_data.get('orderId')}
         except RuntimeError as e:
             print(f"Error placing order: {e}")
             return None
+    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
+    # --- ИСПРАВЛЕННЫЙ cancel_order ---
     def cancel_order(self, order_id: str, symbol: str) -> Optional[Dict[str, Any]]:
         # POST /openApi/swap/v2/trade/order (для отмены используется orderId в теле)
         # BingX использует один эндпоинт для place, cancel, query
         endpoint = "/openApi/swap/v2/trade/order"
         body_data = {
-            "symbol": f"{symbol}-USDT",
+            "symbol": f"{symbol}-USDT", # BingX требует symbol для отмены
             "orderId": order_id,
             # Для отмены не нужно указывать другие поля типа side, type
         }
         try:
             # BingX может использовать POST для отмены тоже!
-            # Попробуем POST, как в документации к /trade/order
             response_data = self._make_request("POST", endpoint, params=body_data, signed=True)
             print(f"Order {order_id} cancelled successfully: {response_data}")
             return response_data
         except RuntimeError as e:
             print(f"Error cancelling order {order_id}: {e}")
             return None
+    # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
     def get_klines(self, symbol: str, interval: str, limit: int) -> List[Dict[str, Any]]:
         # GET /openApi/swap/v3/quote/klines (публичный) - ВАЖНО: v3
